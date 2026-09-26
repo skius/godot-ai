@@ -76,47 +76,96 @@ const _WINDOWS_STDIO_BOOTSTRAP := (
 )
 
 
-## Per-project endpoint ports, stored in project.godot. When present they win
-## over every EditorSettings value, so each project runs its own server.
-const PROJECT_SETTING_HTTP_PORT := "godot_ai/http_port"
-const PROJECT_SETTING_WS_PORT := "godot_ai/ws_port"
-## Base of the range per-project ports are picked from on first activation.
+## Per-checkout endpoint ports, kept in the checkout's untracked data folder
+## so every clone or git worktree runs its own server. The file records the
+## checkout it belongs to, so a `.godot` copied from another checkout is treated
+## as absent. `mcp_launcher.py` reads (or first creates) the same file, which is
+## how one committed project `.mcp.json` reaches only this checkout's editor.
+const PROJECT_PORTS_FILE := "res://.godot/godot_ai/ports.json"
+## Per-checkout ports are picked from PROJECT_PORT_BASE + 2 * (path hash % slots).
+## mcp_launcher.py uses the same range.
 const PROJECT_PORT_BASE := 20000
-const PROJECT_PORT_SPAN := 20000
+const PROJECT_PORT_SLOTS := 10000
+## Launcher a project-scoped `.mcp.json` runs from the project root.
+const PROJECT_MCP_LAUNCHER := "addons/godot_ai/mcp_launcher.py"
+static var _project_ports := {}
 
 
 static func _project_port(key: String) -> int:
-	if not ProjectSettings.has_setting(key):
-		return 0
-	var value := int(ProjectSettings.get_setting(key))
-	return value if value >= MIN_PORT and value <= MAX_PORT else 0
+	if _project_ports.is_empty():
+		_project_ports = _load_project_ports()
+	return int(_project_ports.get(key, 0))
 
 
-## Pick and persist a free HTTP/WS port pair for this project if it has none.
-## The start offset is derived from the project path so different projects
+static func _checkout_path() -> String:
+	return ProjectSettings.globalize_path("res://").replace("\\", "/").simplify_path().trim_suffix("/")
+
+
+static func _same_checkout(a: String, b: String) -> bool:
+	var left := a.replace("\\", "/").simplify_path().trim_suffix("/")
+	var right := b.replace("\\", "/").simplify_path().trim_suffix("/")
+	if OS.get_name() == "Windows":
+		return left.nocasecmp_to(right) == 0
+	return left == right
+
+
+static func _load_project_ports() -> Dictionary:
+	var path := ProjectSettings.globalize_path(PROJECT_PORTS_FILE)
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not (parsed is Dictionary):
+		return {}
+	var http := int(parsed.get("http_port", 0))
+	var ws := int(parsed.get("ws_port", 0))
+	if http < MIN_PORT or http > MAX_PORT or ws < MIN_PORT or ws > MAX_PORT or http == ws:
+		return {}
+	if not _same_checkout(str(parsed.get("checkout", "")), _checkout_path()):
+		return {}
+	return {"http_port": http, "ws_port": ws}
+
+
+static func _save_project_ports(http: int, ws: int) -> bool:
+	var path := ProjectSettings.globalize_path(PROJECT_PORTS_FILE)
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_warning("MCP | could not write %s" % path)
+		return false
+	file.store_string(JSON.stringify({"http_port": http, "ws_port": ws, "checkout": _checkout_path()}, "  "))
+	file.close()
+	_project_ports = {"http_port": http, "ws_port": ws}
+	return true
+
+
+## Pick and persist a free HTTP/WS port pair for this checkout if it has none.
+## The start offset is derived from the checkout path so different checkouts
 ## rarely propose the same pair even when neither is running.
 static func ensure_project_ports() -> void:
-	if _project_port(PROJECT_SETTING_HTTP_PORT) > 0 and _project_port(PROJECT_SETTING_WS_PORT) > 0:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(PROJECT_PORTS_FILE).get_base_dir())
+	_project_ports = _load_project_ports()
+	if not _project_ports.is_empty():
 		return
-	var seed_path := ProjectSettings.globalize_path("res://").simplify_path()
-	var start: int = PROJECT_PORT_BASE + (absi(seed_path.hash()) % (PROJECT_PORT_SPAN / 2)) * 2
+	var start: int = PROJECT_PORT_BASE + (absi(_checkout_path().hash()) % PROJECT_PORT_SLOTS) * 2
 	var http := suggest_free_port(start, 512)
 	if http == 0:
-		push_warning("MCP | could not pick a free per-project HTTP port")
+		push_warning("MCP | could not pick a free HTTP port for this checkout")
 		return
 	var ws := suggest_free_port(http + 1, 512)
 	if ws == 0:
-		push_warning("MCP | could not pick a free per-project WebSocket port")
+		push_warning("MCP | could not pick a free WebSocket port for this checkout")
 		return
-	ProjectSettings.set_setting(PROJECT_SETTING_HTTP_PORT, http)
-	ProjectSettings.set_setting(PROJECT_SETTING_WS_PORT, ws)
-	ProjectSettings.save()
-	print("MCP | assigned per-project ports HTTP %d / WS %d (saved to project.godot)" % [http, ws])
+	## The launcher may have created the file since the first read; its pair wins.
+	_project_ports = _load_project_ports()
+	if not _project_ports.is_empty():
+		return
+	if _save_project_ports(http, ws):
+		print("MCP | assigned checkout ports HTTP %d / WS %d (%s)" % [http, ws, PROJECT_PORTS_FILE])
 
 
-## Active HTTP port: project setting, user override (if in range) or `DEFAULT_HTTP_PORT`.
+## Active HTTP port: checkout ports file, user override (if in range) or `DEFAULT_HTTP_PORT`.
 static func http_port() -> int:
-	var project := _project_port(PROJECT_SETTING_HTTP_PORT)
+	var project := _project_port("http_port")
 	if project > 0:
 		return project
 	var override := v4_endpoint_ports_status()
@@ -127,7 +176,7 @@ static func http_port() -> int:
 
 ## Active WebSocket port: user override (if in range) or `DEFAULT_WS_PORT`.
 static func ws_port() -> int:
-	var project := _project_port(PROJECT_SETTING_WS_PORT)
+	var project := _project_port("ws_port")
 	if project > 0:
 		return project
 	var override := v4_endpoint_ports_status()
@@ -516,11 +565,10 @@ static func apply_endpoint_settings(changes: Dictionary) -> Dictionary:
 	var next_ws := int(normalized.get(SETTING_WS_PORT, ws_port()))
 	if next_http == next_ws:
 		return {"ok": false, "error": "HTTP and WebSocket ports must differ"}
-	## Ports are per-project: persist them to project.godot, not EditorSettings.
+	## Ports are per checkout: persist them to the checkout's ports file, not EditorSettings.
 	if normalized.has(McpSettings.SETTING_HTTP_PORT) or normalized.has(SETTING_WS_PORT):
-		ProjectSettings.set_setting(PROJECT_SETTING_HTTP_PORT, next_http)
-		ProjectSettings.set_setting(PROJECT_SETTING_WS_PORT, next_ws)
-		ProjectSettings.save()
+		if not _save_project_ports(next_http, next_ws):
+			return {"ok": false, "error": "could not write %s" % PROJECT_PORTS_FILE}
 		normalized.erase(McpSettings.SETTING_HTTP_PORT)
 		normalized.erase(SETTING_WS_PORT)
 	var override := v4_endpoint_ports_status()
@@ -1554,16 +1602,11 @@ static func _finalize_attach_launch(
 	}
 
 
-## Render a project-scoped `.mcp.json` document for this project's own server
-## (per-project ports). Meant to be pasted into the project's MCP config
-## instead of registering godot-ai globally. Main thread only.
+## Render the project-scoped `.mcp.json` document. It carries no ports or
+## machine paths: PROJECT_MCP_LAUNCHER resolves this checkout's ports at
+## startup, so the same committed file works in every clone and git worktree.
 static func project_mcp_json() -> Dictionary:
-	var launch := resolve_attach_launch(capture_launch_context())
-	if not bool(launch.get("ok", false)):
-		return {"ok": false, "error": str(launch.get("error", "could not resolve the attach launch command"))}
-	var command := str(launch.get("console_command", launch.get("command", "")))
-	var args: Variant = launch.get("console_args", launch.get("args", []))
-	var doc := {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": command, "args": args}}}
+	var doc := {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": "python", "args": [PROJECT_MCP_LAUNCHER]}}}
 	return {"ok": true, "json": JSON.stringify(doc, "  ")}
 
 

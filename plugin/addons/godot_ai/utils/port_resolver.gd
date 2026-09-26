@@ -6,13 +6,15 @@ extends RefCounted
 ## no editor dependencies. plugin.gd has thin instance shims that wrap
 ## these and increment the cold-start trace counters.
 
-## Canonical pid-file path. plugin.gd::SERVER_PID_FILE re-exports this so
+## Canonical pid-file path. Kept in the checkout's untracked data folder, not
+## `user://`, which Godot keys by project *name*: every clone and worktree of a
+## project would share it. plugin.gd::SERVER_PID_FILE re-exports this so
 ## external readers and tests can use either name.
-const SERVER_PID_FILE := "user://godot_ai_server.pid"
+const SERVER_PID_FILE := "res://.godot/godot_ai/server.pid"
 ## Where a plugin-spawned server reports a failure that happens before it
 ## publishes its capability record (`--startup-report`). Removed before every
 ## spawn, so a report that exists afterwards belongs to that launch.
-const SERVER_STARTUP_REPORT := "user://godot_ai_server_startup.json"
+const SERVER_STARTUP_REPORT := "res://.godot/godot_ai/server_startup.json"
 const WindowsPortReservation := preload("res://addons/godot_ai/utils/windows_port_reservation.gd")
 const LinuxProc := preload("res://addons/godot_ai/utils/linux_proc.gd")
 const SNAPSHOT_DIAGNOSTIC_STAGES := ["single", "pair", "first", "final"]

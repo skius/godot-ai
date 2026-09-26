@@ -636,7 +636,7 @@ func _build_ui() -> void:
 
 	var project_json_btn := Button.new()
 	project_json_btn.text = "Project .mcp.json"
-	project_json_btn.tooltip_text = "Show and copy a project-scoped MCP config for this project's own server (per-project ports)"
+	project_json_btn.tooltip_text = "Show and copy the project-scoped MCP config that reaches only this checkout's own server"
 	project_json_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
 	project_json_btn.pressed.connect(_on_show_project_mcp_json)
 	clients_tab.add_child(project_json_btn)
@@ -2590,7 +2590,7 @@ func _on_show_project_mcp_json() -> void:
 	text.editable = false
 	text.custom_minimum_size = Vector2(640, 260)
 	if bool(result.get("ok", false)):
-		hint.text = "Copied to clipboard. Paste into <project>/.mcp.json (Claude Code project scope):"
+		hint.text = "Copied to clipboard. Save as .mcp.json in the project root and commit it. It is the same for every clone and worktree; %s resolves each checkout's ports." % ClientConfigurator.PROJECT_MCP_LAUNCHER
 		text.text = str(result["json"])
 		DisplayServer.clipboard_set(text.text)
 	else:
