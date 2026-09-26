@@ -76,8 +76,49 @@ const _WINDOWS_STDIO_BOOTSTRAP := (
 )
 
 
-## Active HTTP port: user override (if in range) or `DEFAULT_HTTP_PORT`.
+## Per-project endpoint ports, stored in project.godot. When present they win
+## over every EditorSettings value, so each project runs its own server.
+const PROJECT_SETTING_HTTP_PORT := "godot_ai/http_port"
+const PROJECT_SETTING_WS_PORT := "godot_ai/ws_port"
+## Base of the range per-project ports are picked from on first activation.
+const PROJECT_PORT_BASE := 20000
+const PROJECT_PORT_SPAN := 20000
+
+
+static func _project_port(key: String) -> int:
+	if not ProjectSettings.has_setting(key):
+		return 0
+	var value := int(ProjectSettings.get_setting(key))
+	return value if value >= MIN_PORT and value <= MAX_PORT else 0
+
+
+## Pick and persist a free HTTP/WS port pair for this project if it has none.
+## The start offset is derived from the project path so different projects
+## rarely propose the same pair even when neither is running.
+static func ensure_project_ports() -> void:
+	if _project_port(PROJECT_SETTING_HTTP_PORT) > 0 and _project_port(PROJECT_SETTING_WS_PORT) > 0:
+		return
+	var seed_path := ProjectSettings.globalize_path("res://").simplify_path()
+	var start: int = PROJECT_PORT_BASE + (absi(seed_path.hash()) % (PROJECT_PORT_SPAN / 2)) * 2
+	var http := suggest_free_port(start, 512)
+	if http == 0:
+		push_warning("MCP | could not pick a free per-project HTTP port")
+		return
+	var ws := suggest_free_port(http + 1, 512)
+	if ws == 0:
+		push_warning("MCP | could not pick a free per-project WebSocket port")
+		return
+	ProjectSettings.set_setting(PROJECT_SETTING_HTTP_PORT, http)
+	ProjectSettings.set_setting(PROJECT_SETTING_WS_PORT, ws)
+	ProjectSettings.save()
+	print("MCP | assigned per-project ports HTTP %d / WS %d (saved to project.godot)" % [http, ws])
+
+
+## Active HTTP port: project setting, user override (if in range) or `DEFAULT_HTTP_PORT`.
 static func http_port() -> int:
+	var project := _project_port(PROJECT_SETTING_HTTP_PORT)
+	if project > 0:
+		return project
 	var override := v4_endpoint_ports_status()
 	if bool(override.present):
 		return int(override.get("http_port", 0))
@@ -86,6 +127,9 @@ static func http_port() -> int:
 
 ## Active WebSocket port: user override (if in range) or `DEFAULT_WS_PORT`.
 static func ws_port() -> int:
+	var project := _project_port(PROJECT_SETTING_WS_PORT)
+	if project > 0:
+		return project
 	var override := v4_endpoint_ports_status()
 	if bool(override.present):
 		return int(override.get("ws_port", 0))
@@ -203,6 +247,7 @@ static func _read_port_setting(key: String, default_port: int) -> int:
 ## configured values. Safe to call repeatedly — `add_property_info` is
 ## idempotent and `set_initial_value` only seeds the default.
 static func ensure_settings_registered() -> void:
+	ensure_project_ports()
 	var es := EditorInterface.get_editor_settings()
 	if es == null:
 		return
@@ -469,6 +514,15 @@ static func apply_endpoint_settings(changes: Dictionary) -> Dictionary:
 				return {"ok": false, "error": "unknown endpoint setting: %s" % key}
 	var next_http := int(normalized.get(McpSettings.SETTING_HTTP_PORT, http_port()))
 	var next_ws := int(normalized.get(SETTING_WS_PORT, ws_port()))
+	if next_http == next_ws:
+		return {"ok": false, "error": "HTTP and WebSocket ports must differ"}
+	## Ports are per-project: persist them to project.godot, not EditorSettings.
+	if normalized.has(McpSettings.SETTING_HTTP_PORT) or normalized.has(SETTING_WS_PORT):
+		ProjectSettings.set_setting(PROJECT_SETTING_HTTP_PORT, next_http)
+		ProjectSettings.set_setting(PROJECT_SETTING_WS_PORT, next_ws)
+		ProjectSettings.save()
+		normalized.erase(McpSettings.SETTING_HTTP_PORT)
+		normalized.erase(SETTING_WS_PORT)
 	var override := v4_endpoint_ports_status()
 	var ports_changed := normalized.has(McpSettings.SETTING_HTTP_PORT) or normalized.has(SETTING_WS_PORT)
 	if bool(override.present) and ports_changed:
@@ -1498,6 +1552,19 @@ static func _finalize_attach_launch(
 		"ok": true, "tier": tier, "command": pythonw, "args": wrapped_args,
 		"console_command": command, "console_args": args,
 	}
+
+
+## Render a project-scoped `.mcp.json` document for this project's own server
+## (per-project ports). Meant to be pasted into the project's MCP config
+## instead of registering godot-ai globally. Main thread only.
+static func project_mcp_json() -> Dictionary:
+	var launch := resolve_attach_launch(capture_launch_context())
+	if not bool(launch.get("ok", false)):
+		return {"ok": false, "error": str(launch.get("error", "could not resolve the attach launch command"))}
+	var command := str(launch.get("console_command", launch.get("command", "")))
+	var args: Variant = launch.get("console_args", launch.get("args", []))
+	var doc := {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": command, "args": args}}}
+	return {"ok": true, "json": JSON.stringify(doc, "  ")}
 
 
 ## Select the launch shape a specific client should see. Clients with

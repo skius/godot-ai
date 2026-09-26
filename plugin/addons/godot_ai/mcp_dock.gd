@@ -634,6 +634,13 @@ func _build_ui() -> void:
 	_client_configure_all_btn.pressed.connect(_on_configure_all_clients)
 	clients_tab.add_child(_client_configure_all_btn)
 
+	var project_json_btn := Button.new()
+	project_json_btn.text = "Project .mcp.json"
+	project_json_btn.tooltip_text = "Show and copy a project-scoped MCP config for this project's own server (per-project ports)"
+	project_json_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	project_json_btn.pressed.connect(_on_show_project_mcp_json)
+	clients_tab.add_child(project_json_btn)
+
 	var clients_scroll := ScrollContainer.new()
 	clients_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	clients_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -2571,6 +2578,31 @@ func _scroll_manual_panel_into_view(panel: Control) -> void:
 		ancestor = ancestor.get_parent()
 	if ancestor != null:
 		(ancestor as ScrollContainer).ensure_control_visible(panel)
+
+
+func _on_show_project_mcp_json() -> void:
+	var result := ClientConfigurator.project_mcp_json()
+	var dialog := AcceptDialog.new()
+	dialog.title = "Project MCP config"
+	var box := VBoxContainer.new()
+	var hint := Label.new()
+	var text := TextEdit.new()
+	text.editable = false
+	text.custom_minimum_size = Vector2(640, 260)
+	if bool(result.get("ok", false)):
+		hint.text = "Copied to clipboard. Paste into <project>/.mcp.json (Claude Code project scope):"
+		text.text = str(result["json"])
+		DisplayServer.clipboard_set(text.text)
+	else:
+		hint.text = "Could not build the config:"
+		text.text = str(result.get("error", ""))
+	box.add_child(hint)
+	box.add_child(text)
+	dialog.add_child(box)
+	dialog.confirmed.connect(dialog.queue_free)
+	dialog.canceled.connect(dialog.queue_free)
+	add_child(dialog)
+	dialog.popup_centered()
 
 
 func _on_copy_manual_command(client_id: String) -> void:
